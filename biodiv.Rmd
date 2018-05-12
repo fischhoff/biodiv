@@ -7,7 +7,7 @@ output:
 ---
 
 
-#install packages
+##install packages
 ```{r}
 #install package dplyr if not already installed
 list.of.packages <- c("dplyr", "leaflet", "shiny", "rgdal", "raster", "sp", "data.table")
