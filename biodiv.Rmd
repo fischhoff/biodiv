@@ -1,0 +1,201 @@
+---
+title: "biodiv"
+author: "Ilya"
+date: "5/12/2018"
+output: 
+  github_document
+always_allow_html: yes
+---
+Map species occurrence data from iNaturalist. iNaturalist (inaturalist.org) is a citizen science app. Assign iNaturalist data to U.S. parks. Make a map of number of species seen per park in NYC area. Data for NYC, color-coded by taxa, are available here:
+https://fischhoff.shinyapps.io/shiny_test/ 
+The data for the U.S. are here:
+https://fischhoff.shinyapps.io/biodiversity/ (Note: loads slowly.)    
+
+####install packages
+```{r}
+#install package dplyr if not already installed
+list.of.packages <- c("dplyr", "leaflet", "shiny", "rgdal", "raster", "sp", "data.table", "htmltools")
+new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])]
+if(length(new.packages)) install.packages(new.packages)
+print(new.packages)
+library(dplyr)
+library(leaflet)
+library(shiny)
+library(rgdal)
+library("raster") 
+library("sp")
+library(data.table)
+library(htmltools)
+
+```
+
+####read in shapefile of protected areas and reproject and save as PAD_wgs84.Rdata
+```{r}
+
+#source: https://gapanalysis.usgs.gov/padus/data/download/ (national shapefile)
+PAD <- shapefile("PADUS1_4Combined.shp")
+#change datum
+PAD_wgs84 <- spTransform(PAD, CRS("+proj=longlat +datum=WGS84"))
+
+#assign cooordinates (package: sp)
+PAD_coordinates = coordinates(PAD_wgs84)
+
+PAD_wgs84$X = PAD_coordinates[,1]
+PAD_wgs84$Y = PAD_coordinates[,2]
+
+save(PAD_wgs84, file = "PAD_wgs84.Rdata")
+
+```
+
+####read in iNaturalist data 
+```{r}
+rm(list = ls())
+library("raster")
+library("data.table")
+#occurrence download available here: 
+#https://www.gbif.org/occurrence/download/0016851-180131172636756
+inat = fread("occurrence.txt",blank.lines.skip=TRUE)
+inat = as.data.frame(inat)
+inat$longitude <- inat$decimalLongitude
+inat$latitude <- inat$decimalLatitude
+inat.ok= subset(inat, !is.na(decimalLatitude) & !is.na(decimalLongitude))
+save(inat.ok, file = "inat.ok.Rdata")
+```
+
+####get park coordinates for inat data
+```{r}
+load("inat.ok.Rdata")
+load("PAD_wgs84.Rdata")
+
+#turn it into a SpatialPointsDataFrame
+coordinates(inat.ok) <- c("decimalLongitude","decimalLatitude")#package sp
+
+ # tell R that inat coordinates are in the same lat/lon reference system
+# as the parks data 
+projection(inat.ok) <- projection(PAD_wgs84)
+
+# use 'over' with parks as a SpatialPolygonsDataFrame
+# object, to determine which park (if any) contains each sighting, and
+# store the park name as an attribute of the data
+inat.ok$park <- over(inat.ok, PAD_wgs84)$Unit_Nm#name of park
+inat.ok$X.park <- over(inat.ok, PAD_wgs84)$X
+inat.ok$Y.park <- over(inat.ok, PAD_wgs84)$Y
+inat.ok$park.acres <- over(inat.ok, PAD_wgs84)$GIS_Acres
+
+save(inat.ok, file = "inat.ok.Rdata")
+
+```
+
+####summarize iNaturalist data by park: how many of each taxon are seen in each park?
+```{r}
+library("dplyr")
+load("inat.ok.Rdata")
+df = inat.ok
+class_list = c("Amphibia", "Aves", "Mammalia", "Reptilia", "Arachnida", "Insecta", "Actinopterygii")
+class_list_common = c("Amphibians", "Birds", "Mammals", "Reptiles", "Arachnids", "Insects", "Fish")
+kingdom_list = c("Fungi", "Plantae")
+organism_type <- function(df, class_list, class_list_common, kingdom_list) {
+  df$organism_type = "Other"
+  for (a in 1:length(class_list)){#for each class, assign that class to organism type
+    df$organism_type[which(df$class==class_list[a])] = class_list_common[a]
+  }
+  for (b in 1:length(kingdom_list)){#for each kingdom, assign that kingdom to organism type
+    df$organism_type[which(df$kingdom==kingdom_list[b])] = kingdom_list[b]
+  }
+  return(df)
+}
+
+ptm <- proc.time()#not long -- couple of seconds
+df =organism_type(df, class_list, class_list_common, kingdom_list)
+df = subset(df, organism_type!="Other")
+
+keep.col = c("recordedBy",
+             "X.park",
+             "Y.park",
+             "park",
+             "park.acres",
+             "species",
+             "organism_type",
+             "eventDate")
+df =df[,keep.col]
+
+ptm <- proc.time()#not long -- couple of seconds
+df = data.frame(df)
+df.park <- df %>%
+  group_by(park, organism_type) %>%
+    summarise(
+    X.park = X.park[1],
+    Y.park = Y.park[1],
+    park.acres = park.acres[1],
+    count = n(), 
+    observers = length(unique(recordedBy)),
+    species = length(unique(species))
+    )
+ # print(proc.time() - ptm)
+#remove NA points
+df.park = subset(df.park, !is.na(df.park$X.park))
+save(df.park, file = "df.park.Rdata")
+write.csv(df.park, file = "inat.park.csv")
+```
+
+#find the park with the most species (amphibians, all species, species by acre) in the U.S.
+```{r}
+load("df.park.Rdata")
+A = subset(df.park,organism_type == "Amphibians")
+Amax = subset(A, species == max(A$species))
+print("park with most amphibians in U.S.")
+print(Amax$park)
+print(Amax$species)
+#get number of total species by park
+df.all <- df.park %>%
+  group_by(park) %>%
+  summarize(species_total = sum(species),
+            species_per_acre = species_total/park.acres[1])
+Max = subset(df.all, species_total == max(df.all$species_total))
+print("park with most species")
+print(Max$park)
+
+Max.acre = subset(df.all, species_per_acre!="Inf")
+Max.acre = subset(Max.acre, species_per_acre == max(Max.acre$species_per_acre))
+print("park with most species per acre")
+print(Max.acre$park)
+print(Max.acre$species_per_acre)
+```
+
+####make a map for NYC area
+```{r}
+df= read.csv("inat.park.csv")
+ df = filter(df,X.park >=-74.2589 & X.park< -73.7004 & Y.park <=40.9176 & Y.park>=40.4774)
+
+df$X.park <- jitter(df$X.park, factor = 20)
+df$Y.park <- jitter(df$Y.park, factor = 20) 
+factpal <- colorFactor(topo.colors(9), df$organism_type)
+# color.vec = c("#8c510a",#workaround for making each taxonomic group a different color
+#                 "#bf812d",
+#                 "#dfc27d",
+#                 "#f6e8c3",
+#                 "#f5f5f5",
+#                 "#c7eae5",
+#                 "#80cdc1",
+#                 "#35978f",
+#                 "#01665e")
+  
+    leaflet(df.park) %>%
+      addTiles() %>%
+       setView(lng = mean(df$X.park), lat = mean(df$Y.park) , zoom =10) %>%
+      addCircles(lng = df$X.park,
+                       lat = df$Y.park,
+                 #color = color.vec[df$taxon_num],
+                 #color = ~factpal(organism_type),
+                        label = htmlEscape(paste(df$organism_type, df$species)))#label appears on hover
+```
+
+
+####run shiny app to make map online; requires separate files global.R, server.R
+```{r}
+library(shiny)
+runApp()
+#use rsconnect to connect to shinyapps.io (https://www.shinyapps.io/admin/#/tokens)
+#use global.R, ui.R, server.R; 
+
+```
